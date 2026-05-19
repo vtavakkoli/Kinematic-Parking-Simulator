@@ -1,33 +1,104 @@
-# 🚗 Interactive Parking Path Planner & Simulator
+# Kinematic Parking Simulator
 
-A **100% working, zero-dependency, single-file HTML5 application** that simulates autonomous vehicle path planning, tracking, and parking. This simulator includes support for complex scenarios like reverse parking, angled parking, and even navigating with an attached trailer.
+An interactive, single-file **HTML5 parking simulator** for teaching and experimenting with vehicle path planning, parking maneuvers, and basic autonomous driving concepts.
 
-## ✨ Key Features
+> **Developed by Dr. Vahid Tavakkoli for educational purpose.**
 
-* **Interactive Path Editing**: Uses a "Sparse Editable Control Points" system. Users can drag, drop, add, or delete key points on the path while the simulator recalculates the actual driving trace in real-time.
-* **Multiple Parking Schemes**: Test parallel, perpendicular, and angled parking schemes.
-* **Forward & Reverse Kinematics**: Accurately simulates the steering logic required to back a vehicle (and trailer) into a tight spot.
-* **Trailer Dynamics**: Toggle a trailer hitch! The simulator calculates advanced hitch angles and trailer sweep/footprints.
-* **Collision Detection**: Real-time safety footprint checks. If the vehicle or trailer clips a parking bay or a boundary wall, the simulation pauses and reports the collision.
-* **Save/Load Scenarios**: Export your customized, feasible parking paths as JSON files or save them directly in your browser's local storage.
-* **Feasibility Checking**: Automatically sweeps the path before running to ensure the physics and kinematics of the car can actually make the turns without crashing.
+---
 
-## 🛠️ How It Works (Under the Hood)
+## Overview
 
-This simulator relies on several advanced concepts from robotics, autonomous driving, and computer graphics:
+This project demonstrates how a kinematic vehicle can:
 
-1. **Kinematic Bicycle Model**: The car's movement is simulated using a standard mathematical model for vehicles. It calculates X/Y position, Yaw (heading), Velocity, and Steering Angle over small time steps (`dt`).
-2. **Trailer Math**: When the trailer is enabled, the code tracks a secondary `trailerYaw`. As the car reverses, the steering controller mathematically pushes the trailer to prevent jackknifing, using relative hitch angles.
-3. **Path Generation (Catmull-Rom & Bezier)**: 
-    * When generating an auto-path, it uses cubic Bezier curves to smoothly connect the starting point, staging area, and target parking bay.
-    * When you manually edit the path, it uses **Catmull-Rom Splines** to ensure the dense tracking path smoothly passes through every single control point you placed.
-4. **Pure Pursuit Path Tracking**: The vehicle follows the generated path using a look-ahead controller (similar to "Pure Pursuit"). It finds a point slightly ahead on the path and calculates the required steering angle to intercept it.
-5. **Separating Axis Theorem (SAT)**: Collision detection is handled by projecting the corners of the vehicle (and trailer) polygons against the parking bay polygons. If the shapes intersect, a crash is registered.
+- Enter parking bays using **forward** or **reverse** motion,
+- Handle different parking lot geometries,
+- Follow editable user-defined trajectories,
+- Evaluate collision and feasibility constraints,
+- Optionally include a **trailer** for advanced maneuvering behavior.
 
-## 🚀 Getting Started
+The simulator is implemented in a single `index.html` file using plain JavaScript, HTML, and CSS (no external dependencies).
 
-Because this project is built with vanilla HTML, CSS, and JavaScript, there is no build step required!
+---
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/YourUsername/AutoPark-Sim.git
+## Main Features
+
+- **Parking Schemes**
+  - Parallel parking
+  - Perpendicular parking
+  - Angled parking
+
+- **Direction Modes**
+  - Reverse (by tail)
+  - Forward (by head)
+
+- **Interactive Path Editing**
+  - Toggle path edit mode
+  - Drag control points
+  - Add and delete points
+  - Re-simulate quickly from updated control geometry
+
+- **Simulation Controls**
+  - Simulate path
+  - Start / Pause / Reset animation
+  - Target bay selection
+
+- **Safety and Validation**
+  - Collision-aware footprint checking
+  - Feasibility status feedback
+  - Dashed preview trace of tracked trajectory
+
+- **Scenario Persistence**
+  - Save scenarios in browser storage
+  - Load and delete saved scenarios
+  - Export and import scenarios as JSON
+
+- **Trailer Support**
+  - Optional trailer dynamics for more advanced educational demonstrations
+
+---
+
+## Educational Value
+
+This simulator can be used in courses, labs, and demonstrations related to:
+
+- Vehicle kinematics,
+- Motion planning,
+- Trajectory tracking,
+- Collision detection,
+- Human-in-the-loop path design.
+
+Because all logic is visible in one file, students can directly inspect and modify the algorithms.
+
+---
+
+## Quick Start
+
+1. Clone or download this repository.
+2. Open `index.html` in any modern browser.
+3. Choose scheme, direction, and target bay.
+4. Click **Simulate Path**, then **Start**.
+5. Optionally enable **Edit path** and tune control points.
+
+No build tools or package installation are required.
+
+---
+
+## Project Structure
+
+```text
+.
+├── index.html   # Full simulator (UI + rendering + kinematics + persistence)
+└── README.md
+```
+
+---
+
+## License
+
+This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.
+
+---
+
+## Acknowledgment
+
+Created and maintained for educational use by **Dr. Vahid Tavakkoli**.
