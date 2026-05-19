@@ -1,0 +1,1467 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Reverse Parking Simulator - Sparse Editable Control Points</title>
+<style>
+  :root{--bg:#dfe8f0;--panel:#ffffff;--ink:#1f2937;--blue:#2563eb;--green:#16a34a;--red:#ef4444;--yellow:#eab308;--grid:#d7e1ec;--bay:#334155;}
+  html,body{margin:0;background:var(--bg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:var(--ink)}
+  .wrap{max-width:1280px;margin:0 auto;padding:14px}
+  .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:var(--panel);border-radius:14px;padding:12px 14px;box-shadow:0 2px 10px rgba(15,23,42,.08);margin-bottom:12px}
+  label{font-weight:650;font-size:13px;display:flex;gap:6px;align-items:center}
+  select,input[type=checkbox]{accent-color:#2563eb} select,button{border:1px solid #cbd5e1;border-radius:9px;background:white;padding:8px 10px;font-size:14px; outline:none;}
+  button{cursor:pointer;font-weight:700; transition: background 0.2s;} button.primary{background:#2563eb;color:white;border-color:#2563eb} button.danger{background:#dc2626;color:white;border-color:#dc2626}
+  button:hover{opacity:0.9}
+  .note{font-size:13px;color:#475569;margin-left:auto;min-width:280px;text-align:right;font-weight:500;}
+  canvas{width:100%;height:auto;background:#f8fafc;border-radius:24px;box-shadow:inset 0 0 0 2px #9fb0c5;display:block}
+  .legend{font-size:13px;display:flex;gap:18px;flex-wrap:wrap;margin:8px 4px;color:#475569}.dot{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-2px}.y{background:var(--yellow)}.r{background:var(--red)}.g{background:var(--green)}.t{background:#f59e0b}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="controls">
+    <label>Scheme
+      <select id="scheme">
+        <option value="parallel">Parallel |--|--|</option>
+        <option value="perpendicular">Perpendicular |-|-|</option>
+        <option value="angled">Angled /-/-/</option>
+      </select>
+    </label>
+    <label>Parking Direction
+      <select id="direction">
+        <option value="reverse">Reverse (By Tail)</option>
+        <option value="forward">Forward (By Head)</option>
+      </select>
+    </label>
+    <label>Target <select id="target"></select></label>
+    <label><input id="trailer" type="checkbox"> Trailer enabled</label>
+    <label><input id="showFootprint" type="checkbox" checked> Safety footprint</label>
+    <label><input id="editPath" type="checkbox"> Edit path</label>
+    <button id="addPointBtn" title="Enable, then click on the path to insert a new point">Add Point</button>
+    <button id="deletePointBtn" title="Select a path point, then remove it">Delete Point</button>
+    <button id="saveScenarioBtn" title="Save current scenario settings and key path points in this browser">Save Scenario</button>
+    <label>Saved
+      <select id="savedScenarioSelect"><option value="">No saved scenario</option></select>
+    </label>
+    <button id="loadScenarioBtn" title="Load selected saved scenario">Load</button>
+    <button id="deleteScenarioBtn" title="Delete selected saved scenario">Delete Saved</button>
+    <button id="exportScenarioBtn" title="Download current scenario as JSON">Export JSON</button>
+    <button id="importScenarioBtn" title="Import scenario JSON">Import JSON</button>
+    <input id="scenarioFileInput" type="file" accept="application/json,.json" style="display:none">
+    
+    <button class="primary" id="planBtn">Simulate Path</button>
+    <button id="startBtn">Start</button>
+    <button id="pauseBtn">Pause</button>
+    <button class="danger" id="resetBtn">Reset</button>
+    <div class="note" id="status">Ready. Sparse editable control points version.</div>
+  </div>
+  <canvas id="c" width="1200" height="610"></canvas>
+  <div class="legend">
+    <span><i class="dot g"></i>target bay</span>
+    <span><i class="dot y"></i>forward path (drive)</span>
+    <span><i class="dot r"></i>reverse path (backing)</span>
+    <span><i class="dot t"></i>trailer</span>
+    <span><i class="dot" style="background:#9ca3af"></i>gray dashed: simulated vehicle trace</span>
+  </div>
+</div>
+<script>
+(() => {
+'use strict';
+const canvas=document.getElementById('c'), ctx=canvas.getContext('2d');
+const W=canvas.width,H=canvas.height;
+const boundary={x:15,y:10,w:1170,h:580};
+const roadY=490;
+const cfg={dt:0.045, wheelBase:48, carL:74, carW:34, maxSteer:0.62, maxSpeed:155, maxAccel:240};
+let bays=[], path=[], running=false, stopped=false, collisionReason='', targetIndex=0;
+let state, history=[];
+let simulationPreview=[]; // gray dashed preview of the actual tracked trajectory
+let controlPath=[];
+let selectedPathIdx=-1, draggingPathPoint=false, addPointMode=false;
+let editFeasible={ok:null, reason:'not checked', finalError:null};
+let feasibilityTimer=0;
+const SCENARIO_STORAGE_KEY='parking_sim_saved_scenarios_v2';
+
+// Verified starter paths imported from JSON. These are used only as initial saved control points;
+// the original path-planning functions below are unchanged and remain available via Simulate Path.
+const DEFAULT_SCENARIOS = [
+  {
+    "version": 2,
+    "name": "parallel_forward_L2_2026-05-19T11-54-59",
+    "savedAt": "2026-05-19T11:54:59.533Z",
+    "scenario": {
+      "scheme": "parallel",
+      "direction": "forward",
+      "targetIndex": 1,
+      "targetLabel": "L2",
+      "trailer": false,
+      "showFootprint": true
+    },
+    "feasibility": {
+      "ok": true,
+      "reason": "feasible"
+    },
+    "controlPath": [
+      {
+        "x": 150,
+        "y": 530,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 434.183,
+        "y": 171.492,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 475,
+        "y": 120,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 505,
+        "y": 120,
+        "yaw": 0,
+        "dir": 1
+      }
+    ]
+  },
+  {
+    "version": 2,
+    "name": "parallel_forward_L3_2026-05-19T11-54-23",
+    "savedAt": "2026-05-19T11:54:23.975Z",
+    "scenario": {
+      "scheme": "parallel",
+      "direction": "forward",
+      "targetIndex": 2,
+      "targetLabel": "L3",
+      "trailer": false,
+      "showFootprint": true
+    },
+    "feasibility": {
+      "ok": true,
+      "reason": "feasible"
+    },
+    "controlPath": [
+      {
+        "x": 150,
+        "y": 530,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 578.062,
+        "y": 208.314,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 647.437,
+        "y": 126.751,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 695,
+        "y": 120,
+        "yaw": 0,
+        "dir": 1
+      }
+    ]
+  },
+  {
+    "version": 2,
+    "name": "parallel_forward_L4_2026-05-19T11-53-32",
+    "savedAt": "2026-05-19T11:53:32.687Z",
+    "scenario": {
+      "scheme": "parallel",
+      "direction": "forward",
+      "targetIndex": 3,
+      "targetLabel": "L4",
+      "trailer": false,
+      "showFootprint": true
+    },
+    "feasibility": {
+      "ok": true,
+      "reason": "feasible"
+    },
+    "controlPath": [
+      {
+        "x": 150,
+        "y": 530,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 757.125,
+        "y": 219.564,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 835.875,
+        "y": 129.563,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 885,
+        "y": 120,
+        "yaw": 0,
+        "dir": 1
+      }
+    ]
+  },
+  {
+    "version": 2,
+    "name": "parallel_reverse_L1_2026-05-19T11-49-40",
+    "savedAt": "2026-05-19T11:49:40.458Z",
+    "scenario": {
+      "scheme": "parallel",
+      "direction": "reverse",
+      "targetIndex": 0,
+      "targetLabel": "L1",
+      "trailer": false,
+      "showFootprint": true
+    },
+    "feasibility": {
+      "ok": true,
+      "reason": "feasible"
+    },
+    "controlPath": [
+      {
+        "x": 150,
+        "y": 530,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 241.5,
+        "y": 479.253,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 323,
+        "y": 352,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 387.75,
+        "y": 247.689,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 447.75,
+        "y": 274.877,
+        "yaw": 0,
+        "dir": -1
+      },
+      {
+        "x": 356.812,
+        "y": 139.876,
+        "yaw": 0,
+        "dir": -1
+      },
+      {
+        "x": 315,
+        "y": 120,
+        "yaw": 0,
+        "dir": -1
+      }
+    ]
+  },
+  {
+    "version": 2,
+    "name": "parallel_reverse_L2_2026-05-19T11-50-14",
+    "savedAt": "2026-05-19T11:50:14.062Z",
+    "scenario": {
+      "scheme": "parallel",
+      "direction": "reverse",
+      "targetIndex": 1,
+      "targetLabel": "L2",
+      "trailer": false,
+      "showFootprint": true
+    },
+    "feasibility": {
+      "ok": true,
+      "reason": "feasible"
+    },
+    "controlPath": [
+      {
+        "x": 150,
+        "y": 530,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 285,
+        "y": 515,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 513,
+        "y": 350,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 572.437,
+        "y": 269.252,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 612,
+        "y": 294,
+        "yaw": 0,
+        "dir": -1
+      },
+      {
+        "x": 553,
+        "y": 146,
+        "yaw": 0,
+        "dir": -1
+      },
+      {
+        "x": 505,
+        "y": 120,
+        "yaw": 0,
+        "dir": -1
+      }
+    ]
+  },
+  {
+    "version": 2,
+    "name": "parallel_reverse_L3_2026-05-19T11-51-04",
+    "savedAt": "2026-05-19T11:51:04.197Z",
+    "scenario": {
+      "scheme": "parallel",
+      "direction": "reverse",
+      "targetIndex": 2,
+      "targetLabel": "L3",
+      "trailer": false,
+      "showFootprint": true
+    },
+    "feasibility": {
+      "ok": true,
+      "reason": "feasible"
+    },
+    "controlPath": [
+      {
+        "x": 150,
+        "y": 530,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 548.062,
+        "y": 495.191,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 688.687,
+        "y": 267.377,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 751.5,
+        "y": 227.064,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 796.5,
+        "y": 264.564,
+        "yaw": 0,
+        "dir": -1
+      },
+      {
+        "x": 742.125,
+        "y": 138.938,
+        "yaw": 0,
+        "dir": -1
+      },
+      {
+        "x": 695,
+        "y": 120,
+        "yaw": 0,
+        "dir": -1
+      }
+    ]
+  },
+  {
+    "version": 2,
+    "name": "parallel_reverse_L4_2026-05-19T11-51-44",
+    "savedAt": "2026-05-19T11:51:44.276Z",
+    "scenario": {
+      "scheme": "parallel",
+      "direction": "reverse",
+      "targetIndex": 3,
+      "targetLabel": "L4",
+      "trailer": false,
+      "showFootprint": true
+    },
+    "feasibility": {
+      "ok": true,
+      "reason": "feasible"
+    },
+    "controlPath": [
+      {
+        "x": 150,
+        "y": 530,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 270,
+        "y": 530,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 918.375,
+        "y": 262.689,
+        "yaw": 0,
+        "dir": 1
+      },
+      {
+        "x": 1032.5,
+        "y": 248,
+        "yaw": 0,
+        "dir": -1
+      },
+      {
+        "x": 945.562,
+        "y": 143.626,
+        "yaw": 0,
+        "dir": -1
+      },
+      {
+        "x": 885,
+        "y": 120,
+        "yaw": 0,
+        "dir": -1
+      }
+    ]
+  }
+];
+
+function normalizeScenarioPayload(payload){
+  if(!payload || typeof payload!=='object') return null;
+  const rawScenario = payload.scenario || payload.settings;
+  if(!rawScenario || !Array.isArray(payload.controlPath)) return null;
+  return {
+    version: payload.version || 2,
+    name: payload.name || '',
+    savedAt: payload.savedAt || '',
+    scenario: {
+      scheme: rawScenario.scheme || 'parallel',
+      direction: rawScenario.direction || 'reverse',
+      targetIndex: Number(rawScenario.targetIndex)||0,
+      targetLabel: rawScenario.targetLabel || '',
+      trailer: !!rawScenario.trailer,
+      showFootprint: rawScenario.showFootprint !== false
+    },
+    feasibility: payload.feasibility || {ok:null, reason:'not checked'},
+    controlPath: payload.controlPath
+  };
+}
+function scenarioKeyFromParts(scheme,direction,targetIndex,trailer){
+  return [scheme,direction,Number(targetIndex)||0,trailer?'trailer':'car'].join('|');
+}
+function scenarioKey(payload){
+  const p=normalizeScenarioPayload(payload);
+  if(!p) return '';
+  return scenarioKeyFromParts(p.scenario.scheme,p.scenario.direction,p.scenario.targetIndex,p.scenario.trailer);
+}
+function findDefaultScenarioForCurrentSelection(){
+  const key=scenarioKeyFromParts(ui.scheme.value,ui.direction.value,+ui.target.value,ui.trailer.checked);
+  return DEFAULT_SCENARIOS.find(p=>scenarioKey(p)===key) || null;
+}
+function loadDefaultScenarioIntoEditor(payload, showMessage=true){
+  const p=normalizeScenarioPayload(payload);
+  if(!p) return false;
+  running=false; stopped=false; collisionReason=''; selectedPathIdx=-1; addPointMode=false; ui.addPoint.textContent='Add Point';
+  ui.scheme.value=p.scenario.scheme;
+  ui.direction.value=p.scenario.direction;
+  ui.trailer.checked=!!p.scenario.trailer;
+  ui.showFootprint.checked=p.scenario.showFootprint !== false;
+  rebuildBays();
+  targetIndex=clamp(Number(p.scenario.targetIndex)||0,0,bays.length-1);
+  ui.target.value=targetIndex;
+  controlPath=compactControlPath(p.controlPath.map(pt=>({
+    x:clamp(Number(pt.x),boundary.x+8,boundary.x+boundary.w-8),
+    y:clamp(Number(pt.y),boundary.y+8,boundary.y+boundary.h-8),
+    yaw:Number.isFinite(Number(pt.yaw)) ? Number(pt.yaw) : 0,
+    dir:(Number(pt.dir)||1) < 0 ? -1 : 1
+  })));
+  ui.editPath.checked=true;
+  recalcEditablePath();
+  resetCar(false);
+  const feas=checkEditedPathFeasible(false);
+  if(showMessage){
+    ui.status.style.color=feas.ok?'#16a34a':'#dc2626';
+    ui.status.textContent=(feas.ok?'Loaded verified starter path: ':'Starter path loaded, but check failed: ')+(p.name||'default')+(feas.ok?'.':' — '+feas.reason+'.');
+  }
+  draw();
+  return true;
+}
+function seedDefaultScenariosToStorage(){
+  const map=getSavedScenarioMap();
+  let changed=false;
+  for(const raw of DEFAULT_SCENARIOS){
+    const p=normalizeScenarioPayload(raw);
+    if(!p) continue;
+    const name=p.name || scenarioKey(p);
+    if(!map[name]){ map[name]=p; changed=true; }
+  }
+  if(changed) setSavedScenarioMap(map);
+  refreshSavedScenarioList();
+}
+
+const ui={scheme:gid('scheme'),direction:gid('direction'),target:gid('target'),trailer:gid('trailer'),showFootprint:gid('showFootprint'),editPath:gid('editPath'),addPoint:gid('addPointBtn'),deletePoint:gid('deletePointBtn'),saveScenario:gid('saveScenarioBtn'),savedScenario:gid('savedScenarioSelect'),loadScenario:gid('loadScenarioBtn'),deleteScenario:gid('deleteScenarioBtn'),exportScenario:gid('exportScenarioBtn'),importScenario:gid('importScenarioBtn'),scenarioFile:gid('scenarioFileInput'),status:gid('status'),plan:gid('planBtn'),start:gid('startBtn'),pause:gid('pauseBtn'),reset:gid('resetBtn')};
+function gid(id){return document.getElementById(id)}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+function wrap(a){while(a>Math.PI)a-=2*Math.PI;while(a<-Math.PI)a+=2*Math.PI;return a}
+function lerp(a,b,t){return a+(b-a)*t}
+function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
+function vadd(a,b){return {x:a.x+b.x,y:a.y+b.y}}; function vmul(a,s){return {x:a.x*s,y:a.y*s}}
+function forward(yaw){return {x:Math.cos(yaw),y:Math.sin(yaw)}}; function normal(yaw){return {x:-Math.sin(yaw),y:Math.cos(yaw)}}
+function canvasPoint(evt){
+  const r=canvas.getBoundingClientRect();
+  return {x:(evt.clientX-r.left)*canvas.width/r.width, y:(evt.clientY-r.top)*canvas.height/r.height};
+}
+function distPointSegment(p,a,b){
+  const vx=b.x-a.x, vy=b.y-a.y, wx=p.x-a.x, wy=p.y-a.y;
+  const len2=vx*vx+vy*vy || 1;
+  const t=clamp((wx*vx+wy*vy)/len2,0,1);
+  const q={x:a.x+vx*t,y:a.y+vy*t};
+  return {d:Math.hypot(p.x-q.x,p.y-q.y), q, t};
+}
+function nearestIndexToPoint(arr, pt){
+  let best=0, bestD=Infinity;
+  for(let i=0;i<arr.length;i++){
+    const d=Math.hypot(arr[i].x-pt.x, arr[i].y-pt.y);
+    if(d<bestD){bestD=d; best=i;}
+  }
+  return best;
+}
+
+function getSavedScenarioMap(){
+  try{
+    const raw=localStorage.getItem(SCENARIO_STORAGE_KEY);
+    const data=raw ? JSON.parse(raw) : {};
+    return data && typeof data==='object' && !Array.isArray(data) ? data : {};
+  }catch(e){ return {}; }
+}
+function setSavedScenarioMap(map){
+  localStorage.setItem(SCENARIO_STORAGE_KEY, JSON.stringify(map));
+}
+function refreshSavedScenarioList(selectName=''){
+  const map=getSavedScenarioMap();
+  const names=Object.keys(map).sort((a,b)=>a.localeCompare(b));
+  ui.savedScenario.innerHTML='';
+  const empty=document.createElement('option');
+  empty.value=''; empty.textContent=names.length ? 'Choose scenario' : 'No saved scenario';
+  ui.savedScenario.appendChild(empty);
+  for(const name of names){
+    const opt=document.createElement('option');
+    opt.value=name; opt.textContent=name;
+    ui.savedScenario.appendChild(opt);
+  }
+  if(selectName && map[selectName]) ui.savedScenario.value=selectName;
+}
+function currentScenarioPayload(name=''){
+  ensureSparseControlPath();
+  const controls=(controlPath && controlPath.length ? controlPath : (path.editControls || [])).map(clonePose);
+  return {
+    version:2,
+    name,
+    savedAt:new Date().toISOString(),
+    scenario:{
+      scheme:ui.scheme.value,
+      direction:ui.direction.value,
+      targetIndex:+ui.target.value,
+      targetLabel:bays[+ui.target.value]?.label || '',
+      trailer:ui.trailer.checked,
+      showFootprint:ui.showFootprint.checked
+    },
+    controlPath:controls
+  };
+}
+function applyScenarioPayload(payload, check=true){
+  payload=normalizeScenarioPayload(payload);
+  if(!payload || !Array.isArray(payload.controlPath) || payload.controlPath.length<2){
+    ui.status.style.color='#dc2626';
+    ui.status.textContent='Could not load scenario: JSON does not contain scenario/settings and path points.';
+    return false;
+  }
+  running=false; stopped=false; collisionReason=''; selectedPathIdx=-1; addPointMode=false; ui.addPoint.textContent='Add Point';
+  ui.scheme.value=payload.scenario.scheme || 'parallel';
+  ui.direction.value=payload.scenario.direction || 'reverse';
+  ui.trailer.checked=!!payload.scenario.trailer;
+  ui.showFootprint.checked=payload.scenario.showFootprint !== false;
+  rebuildBays();
+  targetIndex=clamp(Number(payload.scenario.targetIndex)||0,0,bays.length-1);
+  ui.target.value=targetIndex;
+  controlPath=compactControlPath(payload.controlPath.map(p=>({
+    x:clamp(Number(p.x),boundary.x+8,boundary.x+boundary.w-8),
+    y:clamp(Number(p.y),boundary.y+8,boundary.y+boundary.h-8),
+    yaw:Number.isFinite(Number(p.yaw)) ? Number(p.yaw) : 0,
+    dir:(Number(p.dir)||1) < 0 ? -1 : 1
+  })));
+  ui.editPath.checked=true;
+  recalcEditablePath();
+  resetCar(false);
+  if(check) checkEditedPathFeasible(true);
+  draw();
+  return true;
+}
+function saveCurrentScenario(){
+  const defaultName=`${ui.scheme.value}-${ui.direction.value}-${bays[+ui.target.value]?.label || 'target'}`;
+  const name=(prompt('Scenario name:', defaultName) || '').trim();
+  if(!name) return;
+  const map=getSavedScenarioMap();
+  map[name]=currentScenarioPayload(name);
+  setSavedScenarioMap(map);
+  refreshSavedScenarioList(name);
+  ui.status.style.color='#16a34a';
+  ui.status.textContent=`Saved scenario "${name}" with settings and ${map[name].controlPath.length} key path points.`;
+}
+function loadSelectedScenario(){
+  const name=ui.savedScenario.value;
+  const map=getSavedScenarioMap();
+  if(!name || !map[name]){
+    ui.status.style.color='#dc2626';
+    ui.status.textContent='Choose a saved scenario first.';
+    return;
+  }
+  if(applyScenarioPayload(map[name], true)){
+    ui.status.style.color=editFeasible.ok?'#16a34a':'#dc2626';
+    ui.status.textContent=(editFeasible.ok?'Loaded feasible scenario: ':'Loaded scenario, but not feasible: ')+name+(editFeasible.ok?'.':' — '+editFeasible.reason+'.');
+  }
+}
+function deleteSelectedScenario(){
+  const name=ui.savedScenario.value;
+  const map=getSavedScenarioMap();
+  if(!name || !map[name]) return;
+  if(!confirm(`Delete saved scenario "${name}"?`)) return;
+  delete map[name];
+  setSavedScenarioMap(map);
+  refreshSavedScenarioList();
+  ui.status.style.color='#475569';
+  ui.status.textContent=`Deleted saved scenario "${name}".`;
+}
+function exportCurrentScenario(){
+  const name=ui.savedScenario.value || `${ui.scheme.value}-${ui.direction.value}-${bays[+ui.target.value]?.label || 'target'}`;
+  const payload=currentScenarioPayload(name);
+  const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download=(name.replace(/[^a-z0-9_-]+/gi,'_') || 'parking_scenario')+'.json';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  ui.status.style.color='#16a34a';
+  ui.status.textContent='Exported scenario JSON with settings and key path points.';
+}
+function importScenarioFile(file){
+  const reader=new FileReader();
+  reader.onload=()=>{
+    try{
+      const payload=JSON.parse(String(reader.result||''));
+      const name=(payload.name || file.name.replace(/\.json$/i,'') || 'imported-scenario').trim();
+      payload.name=name;
+      if(!applyScenarioPayload(payload,true)) return;
+      const map=getSavedScenarioMap();
+      map[name]=currentScenarioPayload(name);
+      setSavedScenarioMap(map);
+      refreshSavedScenarioList(name);
+      ui.status.style.color=editFeasible.ok?'#16a34a':'#dc2626';
+      ui.status.textContent=(editFeasible.ok?'Imported and saved feasible scenario: ':'Imported and saved scenario, but not feasible: ')+name+(editFeasible.ok?'.':' — '+editFeasible.reason+'.');
+    }catch(e){
+      ui.status.style.color='#dc2626';
+      ui.status.textContent='Import failed: invalid JSON file.';
+    }
+  };
+  reader.readAsText(file);
+}
+
+function clonePose(p){return {x:p.x,y:p.y,yaw:p.yaw||0,dir:p.dir||1};}
+function cloneControlPath(){return controlPath.map(clonePose);}
+function simplifyRdp(points, eps){
+  if(points.length<=2) return points.slice();
+  let bestI=-1, bestD=-1;
+  const a=points[0], b=points[points.length-1];
+  for(let i=1;i<points.length-1;i++){
+    const d=distPointSegment(points[i],a,b).d;
+    if(d>bestD){bestD=d; bestI=i;}
+  }
+  if(bestD>eps){
+    const left=simplifyRdp(points.slice(0,bestI+1),eps);
+    const right=simplifyRdp(points.slice(bestI),eps);
+    return left.slice(0,-1).concat(right);
+  }
+  return [points[0], points[points.length-1]];
+}
+function compactControlPath(points){
+  // Safety guard: never expose the dense sampled trajectory as edit handles.
+  // If many points arrive here, keep only geometric corner/key points.
+  let pts=(points||[]).map(clonePose);
+  if(pts.length<=10) return pts;
+  const must=[];
+  must.push(0);
+  for(let i=1;i<pts.length;i++){
+    if((pts[i-1].dir||1)!==(pts[i].dir||1)) must.push(i);
+  }
+  must.push(pts.length-1);
+  let eps=35, simplified=[];
+  for(let tries=0;tries<8;tries++){
+    simplified=simplifyRdp(pts,eps);
+    for(const mi of must){
+      const mp=pts[mi];
+      if(!simplified.some(p=>Math.hypot(p.x-mp.x,p.y-mp.y)<1)) simplified.push(mp);
+    }
+    simplified.sort((a,b)=>nearestIndexToPoint(pts,a)-nearestIndexToPoint(pts,b));
+    const unique=[];
+    for(const q of simplified){
+      if(!unique.length || Math.hypot(unique[unique.length-1].x-q.x,unique[unique.length-1].y-q.y)>24 || unique[unique.length-1].dir!==q.dir) unique.push(q);
+    }
+    simplified=unique;
+    if(simplified.length<=10) break;
+    eps+=20;
+  }
+  return simplified.slice(0,10).map(clonePose);
+}
+function setEditHandles(arr, pts){
+  // Store only editable key control points. The dense path is used only for tracking/drawing.
+  controlPath = compactControlPath(pts);
+  arr.editControls = controlPath.map(clonePose);
+  arr.editHandles = controlPath.map(pt=>nearestIndexToPoint(arr, pt));
+  return arr;
+}
+function catmull(a,b,c,d,t){
+  const t2=t*t, t3=t2*t;
+  return {
+    x:0.5*((2*b.x)+(-a.x+c.x)*t+(2*a.x-5*b.x+4*c.x-d.x)*t2+(-a.x+3*b.x-3*c.x+d.x)*t3),
+    y:0.5*((2*b.y)+(-a.y+c.y)*t+(2*a.y-5*b.y+4*c.y-d.y)*t2+(-a.y+3*b.y-3*c.y+d.y)*t3)
+  };
+}
+function rebuildDensePathFromControls(){
+  if(controlPath.length<2) return;
+  const dense=[];
+  for(let i=0;i<controlPath.length-1;i++){
+    const p0=controlPath[Math.max(0,i-1)], p1=controlPath[i], p2=controlPath[i+1], p3=controlPath[Math.min(controlPath.length-1,i+2)];
+    const d=Math.hypot(p2.x-p1.x,p2.y-p1.y);
+    const samples=clamp(Math.ceil(d/10),8,32);
+    for(let j=0;j<=samples;j++){
+      if(i>0 && j===0) continue;
+      const t=j/samples;
+      const q=catmull(p0,p1,p2,p3,t);
+      dense.push({x:q.x,y:q.y,yaw:0,dir:p1.dir||1});
+    }
+  }
+  // keep final movement direction compatible with previous segment
+  dense[dense.length-1].dir = controlPath[Math.max(0,controlPath.length-2)].dir || 1;
+  const finalYaw=controlPath[controlPath.length-1].yaw || path[path.length-1]?.yaw || 0;
+  path=assignYaw(dense, finalYaw);
+  path.editHandles=controlPath.map(cp=>nearestIndexToPoint(path, cp));
+}
+function getEditHandles(){
+  return controlPath.map((_,i)=>i);
+}
+
+function ensureSparseControlPath(){
+  // Absolute guard: edit handles must never be the dense trajectory.
+  if(controlPath.length>10){
+    const oldSelected = selectedPathIdx;
+    controlPath = compactControlPath(controlPath);
+    selectedPathIdx = oldSelected>=0 ? Math.min(oldSelected, controlPath.length-1) : -1;
+  }
+}
+
+function recalcEditablePath(){
+  ensureSparseControlPath();
+  if(controlPath.length>=2) rebuildDensePathFromControls();
+  if(state) state.idx = 0;
+}
+
+function checkEditedPathFeasible(showStatus=true){
+  if(!path || path.length<3){
+    editFeasible={ok:false, reason:'path has too few points', finalError:null};
+    return editFeasible;
+  }
+  const savedState=state ? {...state} : null;
+  const savedHistory=history ? history.slice() : [];
+  const res=simulateTracking(path, +ui.target.value, ui.trailer.checked, true);
+  simulationPreview = Array.isArray(res.trail) ? res.trail : [];
+  if(savedState) state=savedState;
+  history=savedHistory;
+  if(res.ok){
+    editFeasible={ok:true, reason:'feasible', finalError:0};
+    if(showStatus){
+      ui.status.style.color='#16a34a';
+      ui.status.textContent='Feasible edited path: collision-free and trackable. Press Start to run it.';
+    }
+  }else{
+    const final=path[path.length-1];
+    const err=res.finalState ? Math.hypot(res.finalState.x-final.x,res.finalState.y-final.y) : null;
+    editFeasible={ok:false, reason:res.reason || 'not trackable', finalError:err};
+    if(showStatus){
+      ui.status.style.color='#dc2626';
+      ui.status.textContent='Not feasible: '+editFeasible.reason+(err!==null ? `, final error ${err.toFixed(1)} px.` : '.');
+    }
+  }
+  return editFeasible;
+}
+function scheduleFeasibilityCheck(){
+  const now=performance.now();
+  if(now-feasibilityTimer<120) return;
+  feasibilityTimer=now;
+  checkEditedPathFeasible(true);
+}
+function nearestPathPoint(pos, radius=18){
+  let best=-1, bestD=radius;
+  for(let i=0;i<controlPath.length;i++){
+    const p=controlPath[i];
+    const d=Math.hypot(p.x-pos.x,p.y-pos.y);
+    if(d<bestD){bestD=d; best=i;}
+  }
+  return best;
+}
+function insertPathPointAt(pos){
+  if(controlPath.length<2) return false;
+  let bestSeg=-1, best={d:Infinity,q:pos,t:0};
+  for(let i=0;i<controlPath.length-1;i++){
+    const cand=distPointSegment(pos,controlPath[i],controlPath[i+1]);
+    if(cand.d<best.d){best=cand; bestSeg=i;}
+  }
+  if(bestSeg<0 || best.d>55){
+    ui.status.style.color='#dc2626';
+    ui.status.textContent='Click closer to an existing path segment to add a point.';
+    return false;
+  }
+  const prev=controlPath[bestSeg], next=controlPath[bestSeg+1];
+  controlPath.splice(bestSeg+1,0,{x:best.q.x,y:best.q.y,yaw:lerpAngle(prev.yaw||0,next.yaw||0,best.t),dir:prev.dir||1});
+  selectedPathIdx=bestSeg+1;
+  recalcEditablePath();
+  resetCar(false);
+  checkEditedPathFeasible(true);
+  return true;
+}
+
+function makeBay(id,cx,cy,w,h,yaw,label){return {id,cx,cy,w,h,yaw,label}}
+function bayCorners(b,inflate=0){return rectCorners(b.cx,b.cy,b.w+inflate*2,b.h+inflate*2,b.yaw)}
+function rectCorners(cx,cy,w,h,yaw){
+  const c=Math.cos(yaw),s=Math.sin(yaw),hw=w/2,hh=h/2;
+  const pts=[[-hw,-hh],[hw,-hh],[hw,hh],[-hw,hh]];
+  return pts.map(p=>({x:cx+p[0]*c-p[1]*s,y:cy+p[0]*s+p[1]*c}));
+}
+function project(poly,ax){let mn=Infinity,mx=-Infinity; for(const p of poly){const q=p.x*ax.x+p.y*ax.y; if(q<mn)mn=q;if(q>mx)mx=q} return [mn,mx]}
+function polysIntersect(a,b){
+  for(const poly of [a,b]){
+    for(let i=0;i<poly.length;i++){
+      const p=poly[i],q=poly[(i+1)%poly.length], edge={x:q.x-p.x,y:q.y-p.y};
+      const len=Math.hypot(edge.x,edge.y)||1, ax={x:-edge.y/len,y:edge.x/len};
+      let mnA=Infinity,mxA=-Infinity, mnB=Infinity,mxB=-Infinity;
+      for(const pt of a){let p=pt.x*ax.x+pt.y*ax.y; if(p<mnA)mnA=p; if(p>mxA)mxA=p;}
+      for(const pt of b){let p=pt.x*ax.x+pt.y*ax.y; if(p<mnB)mnB=p; if(p>mxB)mxB=p;}
+      if(mxA<mnB||mxB<mnA) return false;
+    }
+  }
+  return true;
+}
+function insideBoundary(poly){return poly.every(p=>p.x>=boundary.x+2&&p.x<=boundary.x+boundary.w-2&&p.y>=boundary.y+2&&p.y<=boundary.y+boundary.h-2)}
+
+function rebuildBays(){
+  const scheme=ui.scheme.value; 
+  bays=[];
+  
+  if(scheme==='parallel'){
+    const w=170, h=64, gap=20;
+    const totalW = 4*w + 3*gap;
+    const x0 = (W - totalW)/2 + w/2;
+    for(let i=0;i<4;i++) bays.push(makeBay(i, x0 + i*(w+gap), 120, w, h, 0, `L${i+1}`));
+  } else if(scheme==='perpendicular'){
+    const w=150, h=80, gap=20;
+    const totalW = 6*h + 5*gap;
+    const x0 = (W - totalW)/2 + h/2;
+    for(let i=0;i<6;i++) bays.push(makeBay(i, x0 + i*(h+gap), 170, w, h, Math.PI/2, `P${i+1}`));
+  } else {
+    const w=170, h=66, gap=25;
+    const yaw = -Math.PI/7; // Angled yaw
+    const shiftX = w * Math.cos(Math.abs(yaw)) + gap;
+    const totalW = 4*shiftX - gap;
+    const x0 = (W - totalW)/2 + shiftX/2;
+    for(let i=0;i<4;i++) bays.push(makeBay(i, x0 + i*shiftX, 150, w, h, yaw, `A${i+1}`));
+  }
+  
+  let oldTarget = ui.target.value;
+  ui.target.innerHTML='';
+  bays.forEach((b,i)=>{
+      const o=document.createElement('option');
+      o.value=i; o.textContent=b.label; 
+      ui.target.appendChild(o);
+  });
+  targetIndex=clamp(oldTarget||0, 0, bays.length-1); 
+  ui.target.value=targetIndex;
+}
+
+function initialState(){
+    return { x: 150, y: 530, yaw: 0, v: 0, steer: 0, trailerYaw: 0, idx: 0 };
+}
+
+function bezierPose(a,b,c1,c2,dir,n){const arr=[]; for(let i=0;i<=n;i++){const t=i/n,u=1-t; const x=u*u*u*a.x+3*u*u*t*c1.x+3*u*t*t*c2.x+t*t*t*b.x; const y=u*u*u*a.y+3*u*u*t*c1.y+3*u*t*t*c2.y+t*t*t*b.y; arr.push({x,y,yaw:0,dir})} return arr}
+function linePose(a,b,dir,n){const arr=[]; for(let i=0;i<=n;i++){const t=i/n; arr.push({x:lerp(a.x,b.x,t), y:lerp(a.y,b.y,t), yaw:0, dir});} return arr;}
+function lerpAngle(a,b,t){return a+wrap(b-a)*t}
+
+function assignYaw(p, finalYaw) {
+    for(let i=0;i<p.length;i++){
+        const j=Math.min(p.length-1,i+2), k=Math.max(0,i-2);
+        let yaw=Math.atan2(p[j].y-p[k].y,p[j].x-p[k].x);
+        if(p[i].dir<0) yaw=wrap(yaw+Math.PI);
+        p[i].yaw=yaw;
+    }
+    const m=35; 
+    for(let i=Math.max(0,p.length-m);i<p.length;i++){
+        const t=(i-(p.length-m))/m; 
+        p[i].yaw=lerpAngle(p[i].yaw,finalYaw,t*t*(3-2*t));
+    }
+    p[p.length-1].yaw=finalYaw;
+    return p;
+}
+
+// Generates paths using mathematical alignments
+function createCandidatePath(b, scheme, finalYaw, withTrailer, stagingDist, aisleDist, turnWeight, strategy) {
+  let startYaw = 0;
+  let start = {x: 150, y: 530, yaw: startYaw, dir: 1};
+  
+  let finalX = b.cx, finalY = b.cy;
+  if (withTrailer) { 
+       finalX += Math.cos(finalYaw) * 40;
+       finalY += Math.sin(finalYaw) * 40;
+  }
+  let final = {x: finalX, y: finalY, yaw: finalYaw, dir: strategy === 'reverse' ? -1 : 1};
+  
+  let preFinalDist = scheme === 'parallel' ? (withTrailer ? 60 : 30) : b.w * 0.5;
+  let preFinal = {
+      x: final.x - Math.cos(finalYaw)*preFinalDist * (strategy==='reverse'?-1:1), 
+      y: final.y - Math.sin(finalYaw)*preFinalDist * (strategy==='reverse'?-1:1), 
+      yaw: finalYaw, dir: strategy === 'reverse' ? -1 : 1
+  };
+  
+  // Handled dynamically to sweep into the spot head first
+  if (strategy === 'forward') {
+      let c1 = {x: start.x + turnWeight*1.5, y: start.y};
+      let tw2 = (scheme === 'perpendicular') ? turnWeight * 2.0 : turnWeight * 1.6;
+      let c2 = {x: preFinal.x - Math.cos(finalYaw)*tw2, y: preFinal.y - Math.sin(finalYaw)*tw2};
+      let p = bezierPose(start, preFinal, c1, c2, 1, 50);
+      p = p.concat(linePose(preFinal, final, 1, 15).slice(1));
+      assignYaw(p, finalYaw);
+      return setEditHandles(p, [start, preFinal, final]);
+  }
+  
+  let staging;
+  if(scheme === 'parallel') {
+      let gap = 20; 
+      let stageX = final.x + (b.w *0.75 + gap); 
+      staging = {x: stageX, y: final.y + 2.0 * b.h + (withTrailer? 50:0), yaw: startYaw, dir: -1};
+  } else if(scheme === 'perpendicular') {
+      staging = {
+          x: final.x + stagingDist, 
+          y: Math.min(final.y + aisleDist + 80, boundary.y + boundary.h - 40), 
+          yaw: startYaw, 
+          dir: -1
+      };
+  } else { 
+      staging = {x: final.x + stagingDist, y: final.y + aisleDist, yaw: startYaw, dir: -1};
+  }
+  
+  staging.x = clamp(staging.x, boundary.x + 80, boundary.x + boundary.w - 80);
+  staging.y = clamp(staging.y, boundary.y + 160, boundary.y + boundary.h - 40);
+
+  let alignDist = 60;
+  let preStaging = {
+      x: staging.x - Math.cos(staging.yaw) * alignDist,
+      y: staging.y - Math.sin(staging.yaw) * alignDist,
+      yaw: staging.yaw, dir: 1
+  };
+
+  let approach1X = start.x + Math.min(Math.abs(preStaging.x - start.x) * 0.4, 120);
+  let approach1 = {x: approach1X, y: start.y, yaw: startYaw, dir: 1};
+  
+  let p = [];
+  p = p.concat(bezierPose(start, approach1, {x: start.x + 60, y: start.y}, {x: approach1.x - 60, y: approach1.y}, 1, 20));
+  
+  // Curve up to Pre-Staging point
+  let c1_app = {x: approach1.x + turnWeight, y: approach1.y};
+  let c2_app = {x: preStaging.x - Math.cos(preStaging.yaw)*turnWeight*1.2, y: preStaging.y - Math.sin(preStaging.yaw)*turnWeight*1.2};
+  p = p.concat(bezierPose(approach1, preStaging, c1_app, c2_app, 1, 40).slice(1));
+  
+  // Straight drive from Pre-Staging to Staging to ensure horizontal alignment
+  p = p.concat(linePose(preStaging, staging, 1, 15).slice(1));
+  
+  let rev = [];
+  let tw = withTrailer ? turnWeight * 1.5 : turnWeight; 
+  
+  // Generalized backward sweeping control points for Reverse mode
+  let c1_rev = {x: staging.x - Math.cos(staging.yaw)*tw*1.2, y: staging.y - Math.sin(staging.yaw)*tw*1.2};
+  let c2_rev = {x: preFinal.x + Math.cos(finalYaw)*tw*1.2, y: preFinal.y + Math.sin(finalYaw)*tw*1.2};
+  
+  rev = bezierPose(staging, preFinal, c1_rev, c2_rev, -1, 45);
+  p = p.concat(rev.slice(1));
+  p = p.concat(linePose(preFinal, final, -1, 15).slice(1));
+  
+  assignYaw(p, finalYaw);
+  return setEditHandles(p, [start, approach1, preStaging, staging, preFinal, final]);
+}
+
+function vehicleFootprint(s,withTrailer){
+  const car=rectCorners(s.x,s.y,cfg.carL,cfg.carW,s.yaw);
+  let trailer=null, hitch=null;
+  if(withTrailer){
+    const rear={x:s.x-Math.cos(s.yaw)*cfg.carL*0.55,y:s.y-Math.sin(s.yaw)*cfg.carL*0.55};
+    const trCx=rear.x-Math.cos(s.trailerYaw)*48, trCy=rear.y-Math.sin(s.trailerYaw)*48;
+    trailer=rectCorners(trCx,trCy,58,42,s.trailerYaw); hitch={rear,trCx,trCy};
+  }
+  return {car,trailer,hitch};
+}
+function checkCollision(s,targetId,withTrailer){
+  const fp=vehicleFootprint(s,withTrailer); const bodies=[fp.car]; if(fp.trailer)bodies.push(fp.trailer);
+  for(const body of bodies){ if(!insideBoundary(body)) return {hit:true,reason:'border wall'}; }
+  for(const b of bays){ if(b.id===targetId) continue; const bc=bayCorners(b,3); for(const body of bodies){ if(polysIntersect(body,bc)) return {hit:true,reason:`bay ${b.label}`}; }}
+  return {hit:false,reason:''};
+}
+
+function controlStep(s, p, targetIdx, withTrailer) {
+  if(!p || p.length < 3) return { hit: false, parked: false };
+  let final = p[p.length-1];
+  
+  let currentDir = p[s.idx].dir || 1;
+  let phaseEndIdx = s.idx;
+  while(phaseEndIdx < p.length - 1 && p[phaseEndIdx].dir === currentDir) phaseEndIdx++;
+  if(phaseEndIdx > s.idx && p[phaseEndIdx].dir !== currentDir) phaseEndIdx--;
+
+  let best = s.idx, bestD = Infinity; 
+  const maxI = Math.min(phaseEndIdx, s.idx+28);
+  for(let i=s.idx; i<=maxI; i++) {
+      let d = Math.hypot(p[i].x-s.x, p[i].y-s.y); 
+      if(d < bestD){ bestD = d; best = i; }
+  }
+  s.idx = Math.max(s.idx, best);
+  
+  let distToStop = dist(s, p[phaseEndIdx]);
+  if(phaseEndIdx < p.length - 1 && (distToStop < 15 && Math.abs(s.v) < 10 || s.idx === phaseEndIdx)) {
+      s.idx = phaseEndIdx + 1; 
+      currentDir = p[s.idx].dir;
+      phaseEndIdx = s.idx;
+      while(phaseEndIdx < p.length - 1 && p[phaseEndIdx].dir === currentDir) phaseEndIdx++;
+      if(phaseEndIdx > s.idx && p[phaseEndIdx].dir !== currentDir) phaseEndIdx--;
+  }
+  
+  let baseLa = currentDir > 0 ? 30 : 16; 
+  let la = baseLa + Math.abs(s.v) * 0.15;
+  let ti = s.idx; 
+  while(ti < phaseEndIdx && Math.hypot(p[ti].x-s.x, p[ti].y-s.y) < la) ti++;
+  
+  let ref = p[ti];
+  let desiredSpeed = currentDir * clamp(dist(s, p[phaseEndIdx]) * 1.0, 0, currentDir > 0 ? 55 : 35);
+  
+  let dx = ref.x - s.x, dy = ref.y - s.y;
+  let Ld = Math.hypot(dx, dy) || 1;
+  let pathAngle = Math.atan2(dy, dx);
+  
+  let steer = 0;
+  if (currentDir < 0 && withTrailer) {
+      let tx = s.x - Math.cos(s.yaw)*cfg.carL*0.5 - Math.cos(s.trailerYaw)*48;
+      let ty = s.y - Math.sin(s.yaw)*cfg.carL*0.5 - Math.sin(s.trailerYaw)*48;
+      
+      let tdx = ref.x - tx, tdy = ref.y - ty;
+      let tPathAngle = Math.atan2(tdy, tdx);
+      let alpha = wrap(tPathAngle - (s.trailerYaw + Math.PI));
+      
+      let desiredHitchAngle = Math.atan2(2.0 * 50 * Math.sin(alpha), Math.hypot(tdx, tdy) || 1);
+      let currentHitchAngle = wrap(s.yaw - s.trailerYaw);
+      
+      let err = wrap(desiredHitchAngle - currentHitchAngle);
+      steer = -err * 3.5; 
+      
+      if (Math.abs(currentHitchAngle) > 0.6) steer += 5.0 * Math.sign(currentHitchAngle);
+      
+  } else {
+      let alpha = currentDir > 0 ? wrap(pathAngle - s.yaw) : wrap(pathAngle - (s.yaw + Math.PI));
+      let ppSteer = Math.atan2(2.0 * cfg.wheelBase * Math.sin(alpha), Ld);
+      let yawErr = wrap(ref.yaw - s.yaw);
+      let headSteer = 0.4 * yawErr;
+      steer = ppSteer + headSteer;
+      if (currentDir < 0) steer = -steer; 
+  }
+  
+  steer = clamp(steer, -cfg.maxSteer, cfg.maxSteer);
+  s.steer = lerp(s.steer, steer, 0.4); 
+  let accel = clamp((desiredSpeed - s.v)*3.1, -cfg.maxAccel, cfg.maxAccel);
+  s.v = clamp(s.v + accel*cfg.dt, -cfg.maxSpeed, cfg.maxSpeed);
+  
+  s.x += s.v * Math.cos(s.yaw) * cfg.dt;
+  s.y += s.v * Math.sin(s.yaw) * cfg.dt;
+  s.yaw = wrap(s.yaw + s.v/cfg.wheelBase * Math.tan(s.steer) * cfg.dt);
+  
+  let diff = wrap(s.yaw - s.trailerYaw); 
+  if(Math.abs(s.v) > 0.1) {
+      s.trailerYaw = wrap(s.trailerYaw + (s.v * Math.sin(diff) / 48) * cfg.dt);
+  }
+  
+  let col = checkCollision(s, targetIdx, withTrailer);
+  if(col.hit) return { hit: true, reason: col.reason, parked: false };
+  
+  let finalError = Math.hypot(s.x-final.x, s.y-final.y);
+  let yE = Math.abs(wrap(s.yaw-final.yaw));
+  if(finalError < 12 && yE < 0.15 && Math.abs(s.v) < 6 && s.idx >= p.length - 15) {
+      return { hit: false, reason: '', parked: true };
+  }
+  return { hit: false, reason: '', parked: false };
+}
+
+function simulateTracking(testPath, targetIdx, withTrailer, recordTrail=false) {
+    let s = initialState();
+    let steps = 0;
+    const trail = recordTrail ? [{x:s.x,y:s.y,yaw:s.yaw}] : null;
+    while(steps < 1500) {
+        steps++;
+        let res = controlStep(s, testPath, targetIdx, withTrailer);
+        if(recordTrail && (steps % 2 === 0 || res.hit || res.parked)) trail.push({x:s.x,y:s.y,yaw:s.yaw});
+        if(res.hit) return { ok: false, reason: res.reason, finalState: s, trail };
+        if(res.parked) return { ok: true, reason: 'success', finalState: s, trail };
+    }
+    return { ok: false, reason: 'timeout', finalState: s, trail };
+}
+
+function startPlanningFlow() {
+    ui.status.style.color = '#d97706';
+    ui.status.textContent = 'Running virtual simulation parameter sweep...';
+    setTimeout(executePlannerSearch, 10);
+}
+
+function executePlannerSearch() {
+  targetIndex = +ui.target.value; 
+  const b = bays[targetIndex]; 
+  const scheme = ui.scheme.value;
+  const strategy = ui.direction.value; 
+  const withTrailer = ui.trailer.checked;
+
+  // Prefer a verified starter path when one exists for this exact scenario.
+  // This does not change the original path planner; it only initializes the project from saved points.
+  const starter=findDefaultScenarioForCurrentSelection();
+  if(starter && loadDefaultScenarioIntoEditor(starter,false)){
+      ui.status.style.color = editFeasible.ok ? '#16a34a' : '#dc2626';
+      ui.status.textContent = editFeasible.ok
+        ? `Loaded verified starter path for ${strategy} ${b.label}.`
+        : `Loaded starter path for ${strategy} ${b.label}, but feasibility failed: ${editFeasible.reason}.`;
+      return;
+  }
+  
+  // Calculate final resting orientation directly based on by-head vs by-tail selection
+  let finalYaw;
+  if (scheme === 'parallel') {
+      finalYaw = 0;
+  } else if (scheme === 'perpendicular') {
+      finalYaw = strategy === 'reverse' ? Math.PI/2 : -Math.PI/2;
+  } else {
+      finalYaw = strategy === 'reverse' ? Math.PI - Math.PI/7 : -Math.PI/7;
+  }
+
+  let stagingDists = scheme === 'parallel' ? [0] : [90, 110, 130];
+  let aisleDists = scheme === 'parallel' ? [0] : [180, 220, 260]; 
+  let turnWeights = [50, 75, 100, 125, 150]; 
+  
+  let bestPath = null, bestScore = -Infinity, bestReason = "";
+
+  for(let sd of stagingDists) {
+      for(let ad of aisleDists) {
+          for(let tw of turnWeights) {
+              let cand = createCandidatePath(b, scheme, finalYaw, withTrailer, sd, ad, tw, strategy);
+              let res = simulateTracking(cand, targetIndex, withTrailer);
+              
+              if(res.ok) {
+                  path = cand;
+                  controlPath = compactControlPath(cand.editControls || []);
+                  ui.status.style.color = '#16a34a';
+                  ui.status.textContent = `Success! Calculated perfect, drift-free ${strategy} path.`;
+                  editFeasible={ok:true, reason:'planned feasible', finalError:0};
+                  resetCar(false);
+                  return;
+              } else {
+                  let finalError = Math.hypot(res.finalState.x - cand[cand.length-1].x, res.finalState.y - cand[cand.length-1].y);
+                  let score = -finalError; 
+                  if(score > bestScore) {
+                      bestScore = score;
+                      bestPath = cand;
+                      bestReason = res.reason;
+                  }
+              }
+          }
+      }
+  }
+  
+  path = bestPath || [];
+  controlPath = bestPath && bestPath.editControls ? compactControlPath(bestPath.editControls) : [];
+  ui.status.style.color = '#dc2626';
+  ui.status.textContent = `Warning: Perfect collision-free path not found. Failed due to: ${bestReason}.`;
+  editFeasible={ok:false, reason:bestReason || 'planner failed', finalError:null};
+  resetCar(false);
+}
+
+function resetCar(replan=true){state=initialState(); history=[{x:state.x,y:state.y}]; running=false; stopped=false; collisionReason=''; if(replan) startPlanningFlow(); draw();}
+
+function step(){
+  if(!running||stopped||path.length<3) return;
+  
+  let res = controlStep(state, path, targetIndex, ui.trailer.checked);
+  
+  history.push({x: state.x, y: state.y}); if(history.length > 900) history.shift();
+  
+  if(res.hit) {
+      stopped = true; running = false; collisionReason = res.reason;
+      ui.status.style.color = '#dc2626';
+      ui.status.textContent = 'STOPPED: collision safety triggered: ' + res.reason;
+  } else if(res.parked) {
+      stopped = true; running = false;
+      let final = path[path.length-1];
+      state.x = final.x; state.y = final.y; state.yaw = final.yaw; state.v = 0;
+      ui.status.style.color = '#16a34a';
+      ui.status.textContent = 'Parked perfectly inside ' + bays[targetIndex].label + '!';
+  }
+}
+
+function drawGrid(){
+  ctx.clearRect(0,0,W,H); ctx.fillStyle='#f8fafc'; roundRect(boundary.x,boundary.y,boundary.w,boundary.h,24,true,false);
+  ctx.save(); ctx.beginPath(); roundRect(boundary.x,boundary.y,boundary.w,boundary.h,24,false,false); ctx.clip();
+  ctx.strokeStyle='#dfe7f1'; ctx.lineWidth=1;
+  for(let x=boundary.x+45;x<boundary.x+boundary.w;x+=62){ctx.beginPath();ctx.moveTo(x,boundary.y);ctx.lineTo(x,boundary.y+boundary.h);ctx.stroke()}
+  for(let y=boundary.y+45;y<boundary.y+boundary.h;y+=52){ctx.beginPath();ctx.moveTo(boundary.x,y);ctx.lineTo(boundary.x+boundary.w,y);ctx.stroke()}
+  ctx.setLineDash([20,22]); ctx.strokeStyle='#64748b'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(boundary.x+28,roadY); ctx.lineTo(boundary.x+boundary.w-28,roadY); ctx.stroke(); ctx.setLineDash([]);
+  ctx.restore();
+  ctx.strokeStyle='#9fb0c5'; ctx.lineWidth=2.2; roundRect(boundary.x,boundary.y,boundary.w,boundary.h,24,false,true);
+}
+function drawBays(){
+  for(const b of bays){
+    const target=b.id===targetIndex; const pts=bayCorners(b);
+    ctx.beginPath(); pts.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y)); ctx.closePath();
+    ctx.fillStyle=target?'rgba(34,197,94,.22)':'rgba(255,255,255,.44)'; ctx.fill();
+    ctx.strokeStyle=target?'#16a34a':'#334155'; ctx.lineWidth=target?4:2.3; ctx.stroke();
+    
+    const f=forward(b.yaw), n=normal(b.yaw); 
+    const base = vadd({x:b.cx, y:b.cy}, vmul(f, -b.w * 0.35));
+    ctx.strokeStyle='#94a3b8'; ctx.lineWidth=2; ctx.beginPath(); 
+    ctx.moveTo(base.x - n.x * b.h * 0.4, base.y - n.y * b.h * 0.4); 
+    ctx.lineTo(base.x + n.x * b.h * 0.4, base.y + n.y * b.h * 0.4); ctx.stroke();
+    
+    const ar = vadd({x:b.cx, y:b.cy}, vmul(f, b.w * 0.2)); 
+    drawArrow(ar.x,ar.y,b.yaw,26,target?'#16a34a':'#475569');
+    ctx.save(); ctx.translate(b.cx,b.cy); ctx.rotate(b.yaw); ctx.fillStyle='#111827'; ctx.font='700 17px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(b.label,0,0); ctx.restore();
+  }
+}
+function drawSimulationPreview(){
+  if(!simulationPreview || simulationPreview.length<2) return;
+  ctx.save();
+  ctx.setLineDash([10,8]);
+  ctx.strokeStyle='rgba(107,114,128,.9)';
+  ctx.lineWidth=3;
+  ctx.beginPath();
+  simulationPreview.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // small gray dots at the start and end of the simulated trace
+  const a=simulationPreview[0], b=simulationPreview[simulationPreview.length-1];
+  ctx.fillStyle='rgba(107,114,128,.95)';
+  ctx.beginPath(); ctx.arc(a.x,a.y,4,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(b.x,b.y,5,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+function drawPath(){
+  if(path.length<2)return;
+  ensureSparseControlPath();
+  
+  for (let i=1; i<path.length; i++) {
+      ctx.strokeStyle = path[i].dir < 0 ? '#ef4444' : '#eab308';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(path[i-1].x, path[i-1].y);
+      ctx.lineTo(path[i].x, path[i].y);
+      ctx.stroke();
+  }
+
+  // Do not draw sampled tracking points. Only edit handles are drawn in edit mode.
+  const cuspIdx=controlPath.findIndex((p,i)=>i>0 && controlPath[i-1].dir!==p.dir);
+  if(cuspIdx!==-1){
+     const cusp=controlPath[cuspIdx];
+     ctx.fillStyle='#7c3aed'; ctx.font='600 13px system-ui';
+     ctx.beginPath();ctx.arc(cusp.x,cusp.y,6,0,Math.PI*2);ctx.fill();
+     ctx.fillText('reverse point',cusp.x+12,cusp.y-8);
+  }
+
+  if(ui.editPath.checked){
+    for(let i=0;i<controlPath.length;i++){
+      const p=controlPath[i];
+      const isEnd = i===0 || i===controlPath.length-1;
+      ctx.beginPath(); ctx.arc(p.x,p.y,isEnd?9:7,0,Math.PI*2);
+      ctx.fillStyle = i===selectedPathIdx ? '#7c3aed' : (editFeasible.ok===false ? '#fecaca' : (editFeasible.ok===true ? '#bbf7d0' : (p.dir<0 ? '#fecaca' : '#fef08a')));
+      ctx.fill();
+      ctx.strokeStyle = i===selectedPathIdx ? '#4c1d95' : '#334155';
+      ctx.lineWidth = i===selectedPathIdx ? 3 : 1.8;
+      ctx.stroke();
+    }
+    ctx.fillStyle='#1f2937'; ctx.font='600 13px system-ui';
+    ctx.fillText('Edit: only key control points are shown. Drag them or add a new key point.', boundary.x+22, boundary.y+28);
+    if(editFeasible.ok!==null){
+      ctx.fillStyle=editFeasible.ok?'#16a34a':'#dc2626';
+      ctx.font='700 13px system-ui';
+      ctx.fillText(editFeasible.ok?'FEASIBLE path':'NOT FEASIBLE: '+editFeasible.reason, boundary.x+22, boundary.y+48);
+    }
+  }
+}
+
+function drawCar(){
+  const fp=vehicleFootprint(state,ui.trailer.checked);
+  if(ui.showFootprint.checked){ctx.fillStyle='rgba(37,99,235,.08)'; fillPoly(fp.car); if(fp.trailer)fillPoly(fp.trailer)}
+  if(fp.trailer){ctx.fillStyle='#fbbf24';ctx.strokeStyle='#92400e';ctx.lineWidth=2.2;fillPoly(fp.trailer);strokePoly(fp.trailer); if(fp.hitch){ctx.strokeStyle='#475569';ctx.beginPath();ctx.moveTo(fp.hitch.rear.x,fp.hitch.rear.y);ctx.lineTo(fp.hitch.trCx,fp.hitch.trCy);ctx.stroke();}}
+  
+  ctx.fillStyle=stopped&&collisionReason?'#ef4444':'#94a3b8'; 
+  ctx.strokeStyle='#1e293b'; ctx.lineWidth=2.5; fillPoly(fp.car); strokePoly(fp.car);
+  drawWheels(state);
+  
+  const f=forward(state.yaw); ctx.fillStyle='#93c5fd'; const win=rectCorners(state.x+f.x*18,state.y+f.y*18,23,16,state.yaw); fillPoly(win); strokePoly(win,'#1e3a8a',1.5);
+  ctx.fillStyle='#991b1b'; ctx.beginPath(); ctx.arc(state.x+f.x*45,state.y+f.y*45,6,0,Math.PI*2); ctx.fill();
+}
+function drawWheels(s){
+  const f=forward(s.yaw), n=normal(s.yaw);
+  const positions=[{x:22,y:-20,steer:s.steer},{x:22,y:20,steer:s.steer},{x:-24,y:-20,steer:0},{x:-24,y:20,steer:0}];
+  for(const wp of positions){
+    const cx=s.x+f.x*wp.x+n.x*wp.y, cy=s.y+f.y*wp.x+n.y*wp.y, yaw=s.yaw+wp.steer;
+    const pts=rectCorners(cx,cy,19,8,yaw); ctx.fillStyle='#0f172a'; fillPoly(pts);
+  }
+}
+function drawArrow(x,y,yaw,len,color){ctx.save();ctx.translate(x,y);ctx.rotate(yaw);ctx.fillStyle=color;ctx.beginPath();ctx.moveTo(len/2,0);ctx.lineTo(-len/2,-len*.35);ctx.lineTo(-len/2,len*.35);ctx.closePath();ctx.fill();ctx.restore()}
+function fillPoly(poly){ctx.beginPath();poly.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.closePath();ctx.fill()}
+function strokePoly(poly,color,width){if(color)ctx.strokeStyle=color;if(width)ctx.lineWidth=width;ctx.beginPath();poly.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.closePath();ctx.stroke()}
+function roundRect(x,y,w,h,r,fill,stroke){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath(); if(fill)ctx.fill(); if(stroke)ctx.stroke()}
+function draw(){drawGrid();drawBays();drawPath();drawSimulationPreview(); if(history.length>1){ctx.strokeStyle='rgba(15,23,42,.35)';ctx.lineWidth=2;ctx.beginPath();history.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.stroke();} drawCar(); if(stopped&&collisionReason){ctx.fillStyle='rgba(220,38,38,.12)';ctx.fillRect(boundary.x,boundary.y,boundary.w,boundary.h)}}
+
+function loop(){
+  step(); 
+  draw(); 
+  requestAnimationFrame(loop);
+}
+
+ui.scheme.onchange=()=>{rebuildBays();targetIndex=0;selectedPathIdx=-1;startPlanningFlow()};
+ui.direction.onchange=()=>{rebuildBays();selectedPathIdx=-1;startPlanningFlow()};
+ui.target.onchange=()=>{selectedPathIdx=-1;startPlanningFlow()};
+ui.plan.onclick=()=>{selectedPathIdx=-1;addPointMode=false;ui.addPoint.textContent='Add Point';startPlanningFlow()};
+ui.start.onclick=()=>{
+  if(ui.editPath.checked){
+    const feas=checkEditedPathFeasible(true);
+    if(!feas.ok){ running=false; return; }
+  }
+  if(stopped)resetCar(false); running=true; ui.status.style.color='#475569'; ui.status.textContent='Running live. Simulating path tracking.';
+};
+ui.pause.onclick=()=>{running=false;ui.status.textContent='Paused.';};
+ui.reset.onclick=()=>{selectedPathIdx=-1;addPointMode=false;ui.addPoint.textContent='Add Point';resetCar(true)};
+ui.trailer.onchange=()=>{selectedPathIdx=-1;startPlanningFlow()};
+ui.editPath.onchange=()=>{
+  running=false;
+  if(ui.editPath.checked && controlPath.length>10){
+    controlPath=compactControlPath(controlPath);
+    recalcEditablePath();
+    resetCar(false);
+  }
+  addPointMode=false; ui.addPoint.textContent='Add Point';
+  ui.status.style.color=ui.editPath.checked?'#2563eb':'#475569';
+  ui.status.textContent=ui.editPath.checked?'Path editing enabled: drag a point, or press Add Point and click the path.':'Path editing disabled.';
+  if(ui.editPath.checked) checkEditedPathFeasible(true);
+  draw();
+};
+ui.addPoint.onclick=()=>{
+  if(!ui.editPath.checked) ui.editPath.checked=true;
+  running=false;
+  addPointMode=!addPointMode;
+  ui.addPoint.textContent=addPointMode?'Click Path...':'Add Point';
+  ui.status.style.color='#2563eb';
+  ui.status.textContent=addPointMode?'Click near an existing path segment to insert a point.':'Add point mode disabled.';
+};
+ui.deletePoint.onclick=()=>{
+  if(selectedPathIdx<=0 || selectedPathIdx>=controlPath.length-1){
+    ui.status.style.color='#dc2626';
+    ui.status.textContent='Select an inner path point first. Start and final parking points are protected.';
+    return;
+  }
+  const deletedIdx=selectedPathIdx;
+  controlPath.splice(deletedIdx,1);
+  selectedPathIdx=-1;
+  recalcEditablePath();
+  resetCar(false);
+  checkEditedPathFeasible(true);
+};
+
+ui.saveScenario.onclick=saveCurrentScenario;
+ui.loadScenario.onclick=loadSelectedScenario;
+ui.deleteScenario.onclick=deleteSelectedScenario;
+ui.exportScenario.onclick=exportCurrentScenario;
+ui.importScenario.onclick=()=>ui.scenarioFile.click();
+ui.scenarioFile.onchange=()=>{
+  const file=ui.scenarioFile.files && ui.scenarioFile.files[0];
+  if(file) importScenarioFile(file);
+  ui.scenarioFile.value='';
+};
+
+canvas.addEventListener('mousedown', evt=>{
+  if(!ui.editPath.checked || path.length<2) return;
+  ensureSparseControlPath();
+  const pos=canvasPoint(evt);
+  if(addPointMode){ insertPathPointAt(pos); addPointMode=false; ui.addPoint.textContent='Add Point'; return; }
+  const idx=nearestPathPoint(pos);
+  if(idx!==-1){
+    selectedPathIdx=idx; draggingPathPoint=true; running=false; stopped=false; collisionReason='';
+    ui.status.style.color='#2563eb';
+    ui.status.textContent='Dragging path point. Feasibility is checked automatically.';
+    draw();
+  }
+});
+canvas.addEventListener('mousemove', evt=>{
+  if(!ui.editPath.checked) return;
+  ensureSparseControlPath();
+  const pos=canvasPoint(evt);
+  canvas.style.cursor = addPointMode ? 'crosshair' : (nearestPathPoint(pos)!==-1 ? 'grab' : 'default');
+  if(!draggingPathPoint || selectedPathIdx<0) return;
+  controlPath[selectedPathIdx].x=clamp(pos.x,boundary.x+8,boundary.x+boundary.w-8);
+  controlPath[selectedPathIdx].y=clamp(pos.y,boundary.y+8,boundary.y+boundary.h-8);
+  recalcEditablePath();
+  resetCar(false);
+  scheduleFeasibilityCheck();
+});
+canvas.addEventListener('mouseup', ()=>{
+  if(draggingPathPoint){
+    draggingPathPoint=false;
+    recalcEditablePath();
+    resetCar(false);
+    checkEditedPathFeasible(true);
+  }
+});
+canvas.addEventListener('mouseleave', ()=>{draggingPathPoint=false; canvas.style.cursor='default';});
+canvas.addEventListener('dblclick', evt=>{
+  if(!ui.editPath.checked) return;
+  insertPathPointAt(canvasPoint(evt));
+});
+
+refreshSavedScenarioList(); rebuildBays(); resetCar(true); requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
